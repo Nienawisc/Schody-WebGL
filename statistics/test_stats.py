@@ -2,11 +2,10 @@ import copy
 import json
 import tempfile
 import unittest
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from PIL import Image
-
-from build_stats import HEIGHT, MAX_COUNT, WIDTH, build, normalize_snapshot, public_stats, read_snapshot
+from build_stats import HEIGHT, MAX_COUNT, SVG_NAMESPACE, WIDTH, build, check_replacement, normalize_snapshot, parse_snapshot, public_stats, read_snapshot, render_card
 
 
 class StatisticsTests(unittest.TestCase):
@@ -89,11 +88,8 @@ class StatisticsTests(unittest.TestCase):
             normalize_snapshot(self.pending)
 
     def test_duplicate_keys_rejected(self):
-        with tempfile.TemporaryDirectory() as directory:
-            path = Path(directory) / "snapshot.json"
-            path.write_text('{"schemaVersion":1,"schemaVersion":1}', encoding="utf-8")
-            with self.assertRaises(ValueError):
-                read_snapshot(path)
+        with self.assertRaises(ValueError):
+            parse_snapshot(b'{"schemaVersion":1,"schemaVersion":1}')
 
     def test_oversized_input_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -115,12 +111,13 @@ class StatisticsTests(unittest.TestCase):
             source.write_text(json.dumps(self.ready), encoding="utf-8")
             build(source, root / "first")
             build(source, root / "second")
-            for filename in ("stats.json", "stats.png"):
+            for filename in ("stats.json", "stats.svg"):
                 self.assertEqual((root / "first" / filename).read_bytes(), (root / "second" / filename).read_bytes())
             exported = json.loads((root / "first" / "stats.json").read_text())
             self.assertEqual(exported["updatedAt"], original["updatedAt"])
-            with Image.open(root / "first" / "stats.png") as image:
-                self.assertEqual(image.size, (WIDTH, HEIGHT))
+            svg = ET.parse(root / "first" / "stats.svg").getroot()
+            self.assertEqual(svg.attrib["viewBox"], f"0 0 {WIDTH} {HEIGHT}")
+            self.assertFalse((root / "first" / "stats.png").exists())
         self.assertEqual(self.ready, original)
 
     def test_failed_build_does_not_overwrite_last_card(self):
@@ -129,11 +126,83 @@ class StatisticsTests(unittest.TestCase):
             source = root / "snapshot.json"
             source.write_text(json.dumps(self.ready), encoding="utf-8")
             build(source, root / "public")
-            previous = (root / "public" / "stats.png").read_bytes()
+            previous = (root / "public" / "stats.svg").read_bytes()
             source.write_text('{"USER_ID":"private"}', encoding="utf-8")
             with self.assertRaises(ValueError):
                 build(source, root / "public")
-            self.assertEqual((root / "public" / "stats.png").read_bytes(), previous)
+            self.assertEqual((root / "public" / "stats.svg").read_bytes(), previous)
+
+    def test_svg_uses_only_inert_self_contained_elements(self):
+        raw = render_card(public_stats(self.ready))
+        svg = ET.fromstring(raw)
+        allowed = {f"{{{SVG_NAMESPACE}}}{tag}" for tag in ("svg", "title", "desc", "rect", "text", "line")}
+        for node in svg.iter():
+            self.assertIn(node.tag, allowed)
+            self.assertFalse(any(key.lower().startswith("on") or "href" in key for key in node.attrib))
+        self.assertNotIn(b"<!DOCTYPE", raw)
+        self.assertLess(len(raw), 10000)
+        self.assertIn("20.0%", list(svg.itertext()))
+
+    def test_svg_pending_has_accessible_message(self):
+        svg = ET.fromstring(render_card(public_stats(self.pending)))
+        self.assertEqual(svg.attrib["role"], "img")
+        self.assertIn("AWAITING FIRST REPORT", list(svg.itertext()))
+        self.assertIsNotNone(svg.find(f"{{{SVG_NAMESPACE}}}title"))
+        self.assertIsNotNone(svg.find(f"{{{SVG_NAMESPACE}}}desc"))
+
+    def test_svg_formats_large_counts_without_truncation(self):
+        self.ready.update(runs=MAX_COUNT, deaths=MAX_COUNT, completedRuns=0)
+        texts = list(ET.fromstring(render_card(public_stats(self.ready))).itertext())
+        self.assertIn(f"{MAX_COUNT:,}", texts)
+
+    def test_render_rejects_xml_in_data(self):
+        self.ready["updatedAt"] = '<script>alert("x")</script>'
+        with self.assertRaises(ValueError):
+            render_card(self.ready)
+
+    def test_initial_report_can_replace_pending(self):
+        check_replacement(self.pending, self.ready)
+
+    def test_repeat_report_is_idempotent(self):
+        check_replacement(self.ready, dict(self.ready))
+
+    def test_older_report_rejected(self):
+        with self.assertRaises(ValueError):
+            check_replacement(self.ready, dict(self.ready, updatedAt="2026-11-14T19:00:00Z"))
+
+    def test_same_timestamp_with_different_data_rejected(self):
+        with self.assertRaises(ValueError):
+            check_replacement(self.ready, dict(self.ready, deaths=21))
+
+    def test_pending_submission_rejected(self):
+        with self.assertRaises(ValueError):
+            check_replacement(self.ready, self.pending)
+
+    def test_newer_report_can_have_lower_counts_after_deletion(self):
+        check_replacement(self.ready, dict(self.ready, deaths=19, updatedAt="2026-11-14T21:00:00Z"))
+
+    def test_submission_updates_source_and_both_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "snapshot.json"
+            source.write_text(json.dumps(self.pending), encoding="utf-8")
+            build(source, root / "public", json.dumps(self.ready))
+            self.assertEqual(read_snapshot(source), self.ready)
+            self.assertEqual(json.loads((root / "public" / "stats.json").read_text())["deaths"], 20)
+            self.assertTrue((root / "public" / "stats.svg").is_file())
+
+    def test_invalid_submission_does_not_change_source_or_outputs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "snapshot.json"
+            source.write_text(json.dumps(self.ready), encoding="utf-8")
+            build(source, root / "public")
+            files = (source, root / "public" / "stats.svg", root / "public" / "stats.json")
+            before = [path.read_bytes() for path in files]
+            for payload in ('{"token":"private"}', json.dumps(dict(self.ready, updatedAt="2026-11-14T19:00:00Z"))):
+                with self.assertRaises(ValueError):
+                    build(source, root / "public", payload)
+                self.assertEqual([path.read_bytes() for path in files], before)
 
 
 if __name__ == "__main__":

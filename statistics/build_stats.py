@@ -3,11 +3,10 @@ import json
 import os
 import re
 import tempfile
+import xml.etree.ElementTree as ET
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
-
-from PIL import Image, ImageDraw, ImageFont
 
 ROOT = Path(__file__).resolve().parent
 FIELDS = frozenset({"schemaVersion", "updatedAt", "windowStart", "windowEnd", "runs", "deaths", "completedRuns"})
@@ -15,6 +14,7 @@ COUNT_FIELDS = ("runs", "deaths", "completedRuns")
 MAX_COUNT = 9_007_199_254_740_991
 MAX_INPUT_BYTES = 8192
 WIDTH, HEIGHT = 1040, 900
+SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 BACKGROUND = "#101114"
 PANEL = "#191B20"
 BORDER = "#35373E"
@@ -68,12 +68,28 @@ def normalize_snapshot(data: Any) -> dict[str, Any]:
     return dict(data)
 
 
-def read_snapshot(path: Path) -> dict[str, Any]:
-    with path.open("rb") as stream:
-        raw = stream.read(MAX_INPUT_BYTES + 1)
+def parse_snapshot(raw: bytes) -> dict[str, Any]:
     if len(raw) > MAX_INPUT_BYTES:
         raise ValueError("Snapshot is too large. Never upload raw events or player data.")
     return normalize_snapshot(json.loads(raw.decode("utf-8-sig"), object_pairs_hook=unique_object))
+
+
+def read_snapshot(path: Path) -> dict[str, Any]:
+    with path.open("rb") as stream:
+        return parse_snapshot(stream.read(MAX_INPUT_BYTES + 1))
+
+
+def check_replacement(previous: dict[str, Any], incoming: dict[str, Any]) -> None:
+    previous = normalize_snapshot(previous)
+    incoming = normalize_snapshot(incoming)
+    if incoming["updatedAt"] is None:
+        raise ValueError("A submitted report must contain real aggregate data and its report timestamp.")
+    if previous["updatedAt"] is None:
+        return
+    if incoming["updatedAt"] < previous["updatedAt"]:
+        raise ValueError("A submitted report must not be older than the published snapshot.")
+    if incoming["updatedAt"] == previous["updatedAt"] and incoming != previous:
+        raise ValueError("Different data requires a new SQL report timestamp.")
 
 
 def public_stats(snapshot: dict[str, Any]) -> dict[str, Any]:
@@ -86,56 +102,66 @@ def public_stats(snapshot: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-def font(size: int) -> ImageFont.FreeTypeFont:
-    return ImageFont.load_default(size=size)
+def render_card(stats: dict[str, Any]) -> bytes:
+    stats = public_stats({field: stats[field] for field in FIELDS})
+    ET.register_namespace("", SVG_NAMESPACE)
+    root = ET.Element(f"{{{SVG_NAMESPACE}}}svg", {
+        "width": str(WIDTH), "height": str(HEIGHT), "viewBox": f"0 0 {WIDTH} {HEIGHT}",
+        "role": "img", "aria-labelledby": "card-title card-description",
+        "font-family": "Arial, Helvetica, sans-serif",
+    })
 
+    def element(tag: str, attributes: dict[str, Any], text: str | None = None) -> ET.Element:
+        node = ET.SubElement(root, f"{{{SVG_NAMESPACE}}}{tag}", {key: str(value) for key, value in attributes.items()})
+        node.text = text
+        return node
 
-def fit_font(draw: ImageDraw.ImageDraw, text: str, size: int, max_width: int) -> ImageFont.FreeTypeFont:
-    selected = font(size)
-    while draw.textlength(text, font=selected) > max_width and size > 12:
-        size -= 1
-        selected = font(size)
-    return selected
+    def text(x: int, y: int, value: str, size: int, color: str, bold: bool = False) -> None:
+        element("text", {"x": x, "y": y, "fill": color, "font-size": size,
+                         "font-weight": "700" if bold else "400"}, value)
 
-
-def render_card(stats: dict[str, Any]) -> Image.Image:
-    image = Image.new("RGB", (WIDTH, HEIGHT), BACKGROUND)
-    draw = ImageDraw.Draw(image)
-    draw.rectangle((0, 0, WIDTH, 7), fill=ACCENT)
-    draw.text((58, 43), "LUCKY ROOMBER  /  COMMUNITY RECORDS", fill=ACCENT, font=font(23))
-    heading = "THE BUILDING REMEMBERS."
-    draw.text((58, 96), heading, fill=INK, font=fit_font(draw, heading, 57, 924))
-    draw.text((58, 168), "Not everyone finds their lucky room.", fill=MUTED, font=font(29))
+    element("title", {"id": "card-title"}, "Lucky Roomber community statistics")
     pending = stats["status"] == "awaiting-data"
+    description = "Awaiting first report. No statistics have been published yet."
+    if not pending:
+        description = (f"{stats['deaths']} recorded deaths; {stats['completedRuns']} completed runs; "
+                       f"{stats['runs']} recorded runs. Report updated {stats['updatedAt']}.")
+    element("desc", {"id": "card-description"}, description)
+    element("rect", {"width": WIDTH, "height": HEIGHT, "fill": BACKGROUND})
+    element("rect", {"width": WIDTH, "height": 7, "fill": ACCENT})
+    text(58, 69, "LUCKY ROOMBER  /  COMMUNITY RECORDS", 23, ACCENT)
+    text(58, 145, "THE BUILDING REMEMBERS.", 54, INK, True)
+    text(58, 195, "Not everyone finds their lucky room.", 29, MUTED)
     count = lambda value: "-" if value is None else f"{value:,}"
     rate = stats["escapeRatePercent"]
-    rate_text = "-" if rate is None else f"{rate:.1f}%"
     entries = (
         ("RECORDED DEATHS", count(stats["deaths"]), "Runs ending in death", RED),
         ("COMPLETED RUNS", count(stats["completedRuns"]), "Confirmed completions", INK),
-        ("ESCAPE RATE", rate_text, "Among death/completion outcomes", ACCENT),
+        ("ESCAPE RATE", "-" if rate is None else f"{rate:.1f}%", "Among death/completion outcomes", ACCENT),
         ("RECORDED RUNS", count(stats["runs"]), "Not unique players", INK),
     )
     for index, (label, value, caption, color) in enumerate(entries):
         x = 58 + (index % 2) * 474
         y = 232 + (index // 2) * 222
-        draw.rounded_rectangle((x, y, x + 450, y + 200), radius=14, fill=PANEL, outline=BORDER, width=2)
-        draw.text((x + 25, y + 20), label, fill=MUTED, font=fit_font(draw, label, 28, 400))
-        draw.text((x + 23, y + 53), value, fill=color, font=fit_font(draw, value, 96, 402))
-        draw.text((x + 25, y + 162), caption, fill=MUTED, font=fit_font(draw, caption, 24, 400))
-    draw.line((58, 688, 982, 688), fill=BORDER, width=2)
+        element("rect", {"x": x, "y": y, "width": 450, "height": 200, "rx": 14,
+                         "fill": PANEL, "stroke": BORDER, "stroke-width": 2})
+        text(x + 25, y + 43, label, 26, MUTED)
+        text(x + 23, y + 137, value, min(90, int(390 / (0.68 * max(len(value), 1)))), color, True)
+        text(x + 25, y + 180, caption, 23, MUTED)
+    element("line", {"x1": 58, "y1": 688, "x2": 982, "y2": 688, "stroke": BORDER, "stroke-width": 2})
     if pending:
-        draw.text((58, 714), "AWAITING FIRST REPORT", fill=ACCENT, font=font(29))
-        draw.text((58, 757), "No statistics have been published yet.", fill=MUTED, font=font(26))
+        text(58, 742, "AWAITING FIRST REPORT", 29, ACCENT, True)
+        text(58, 784, "No statistics have been published yet.", 26, MUTED)
     else:
         updated = stats["updatedAt"].replace("T", " ").replace("Z", " UTC")
-        draw.text((58, 714), f"REPORT UPDATED  {updated}", fill=ACCENT, font=font(25))
+        text(58, 742, f"REPORT UPDATED  {updated}", 25, ACCENT)
         window = "No recorded runs in this report."
         if stats["windowStart"] is not None:
             window = f"Available data: {stats['windowStart']} to {stats['windowEnd']}"
-        draw.text((58, 757), window, fill=MUTED, font=font(26))
-    draw.text((58, 811), "Analytics-enabled runs only. Not a live counter.", fill=MUTED, font=font(26))
-    return image
+        text(58, 784, window, 26, MUTED)
+    text(58, 841, "Analytics-enabled runs only. Not a live counter.", 26, MUTED)
+    ET.indent(root, space="  ")
+    return ET.tostring(root, encoding="utf-8", xml_declaration=True) + b"\n"
 
 
 def atomic_write(path: Path, content: bytes) -> None:
@@ -150,28 +176,37 @@ def atomic_write(path: Path, content: bytes) -> None:
             os.unlink(temporary)
 
 
-def build(source: Path, output: Path) -> dict[str, Any]:
-    from io import BytesIO
+def serialize(data: dict[str, Any]) -> bytes:
+    return (json.dumps(data, ensure_ascii=True, indent=2, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
 
-    stats = public_stats(read_snapshot(source))
-    serialized = (json.dumps(stats, ensure_ascii=True, indent=2, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
-    buffer = BytesIO()
-    render_card(stats).save(buffer, format="PNG", optimize=True)
-    atomic_write(output / "stats.json", serialized)
-    atomic_write(output / "stats.png", buffer.getvalue())
+
+def build(source: Path, output: Path, submitted_json: str = "") -> dict[str, Any]:
+    snapshot = read_snapshot(source)
+    if submitted_json.strip():
+        incoming = parse_snapshot(submitted_json.encode("utf-8"))
+        check_replacement(snapshot, incoming)
+        snapshot = incoming
+    stats = public_stats(snapshot)
+    svg = render_card(stats)
+    atomic_write(output / "stats.svg", svg)
+    atomic_write(output / "stats.json", serialize(stats))
+    if submitted_json.strip():
+        atomic_write(source, serialize(snapshot))
     return stats
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Build the public Lucky Roomber card from aggregate counters only.")
+    parser = argparse.ArgumentParser(description="Build the public Lucky Roomber SVG from aggregate counters only.")
     parser.add_argument("--input", type=Path, default=ROOT / "snapshot.json")
     parser.add_argument("--output", type=Path, default=ROOT / "public")
+    parser.add_argument("--input-env", help="Name of an environment variable containing an optional replacement JSON report.")
     arguments = parser.parse_args()
     try:
-        result = build(arguments.input, arguments.output)
-    except (OSError, ValueError, UnicodeError):
-        parser.exit(1, "Invalid aggregate snapshot or unavailable input/output. Check the documented schema; do not paste raw events.\n")
-    print(f"Statistics card built successfully ({result['status']}).")
+        submitted = "" if arguments.input_env is None else os.environ.get(arguments.input_env, "")
+        result = build(arguments.input, arguments.output, submitted)
+    except (OSError, ValueError, UnicodeError, RecursionError):
+        parser.exit(1, "Invalid, stale or unavailable aggregate report. Check the schema and timestamp; never submit raw events or secrets.\n")
+    print(f"Statistics SVG built successfully ({result['status']}).")
 
 
 if __name__ == "__main__":
