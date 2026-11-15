@@ -14,7 +14,7 @@ Workflow zapisuje tylko `statistics/snapshot.json`, `statistics/public/stats.svg
 
 ## Najprostsza aktualizacja bez edytowania plikow
 
-1. W odpowiednim projekcie i srodowisku Unity Analytics uruchom `export-public-stats.sql` w SQL Data Explorer.
+1. W odpowiednim projekcie i srodowisku Unity Analytics uruchom uzgodnione zapytanie eksportujace w SQL Data Explorer. Zapytanie jest przekazywane poza publicznym repozytorium; zapisz je w swoim panelu Unity.
 2. Skopiuj jedna komorke `PUBLIC_STATS_JSON`, od `{` do `}`. Bez naglowka i bez zewnetrznego escapowania CSV.
 3. Otworz `Actions > Update public statistics > Run workflow`, wybierz `master` i wklej wynik w `snapshot_json`.
 4. Uruchom workflow. Walidacja, generowanie SVG/JSON i commit raportu wykonuja sie automatycznie. Sprawdz zielony wynik joba `publish`.
@@ -71,14 +71,14 @@ Oczekiwane: HTTP 200 i typ `image/svg+xml` (ewentualnie z charset). Otworz tez s
 
 | Pole | Znaczenie |
 | --- | --- |
-| Recorded deaths | Ostatni raport rozgrywki ma `sc_report_kind = 'death'`. |
-| Completed runs | Ostatni raport ma `sc_report_kind = 'completed'`; samo `sc_target_reached = true` nie wystarcza. |
+| Recorded deaths | Rozgrywka ma potwierdzony raport `sc_report_kind = 'death'`. |
+| Completed runs | Rozgrywka ma potwierdzony raport `sc_report_kind = 'completed'`; samo `sc_target_reached = true` nie wystarcza. |
 | Escape rate | `completedRuns / (completedRuns + deaths) * 100`; nierozstrzygniete rozgrywki nie trafiaja do mianownika. Bez wynikow pokazujemy kreske. |
 | Recorded runs | Rozgrywki po deduplikacji, nie liczba ludzi i nie MAU. |
 
-SQL pozostaje bez zmian: wybiera ostatnia migawke `(UNITY_ENVIRONMENT_NAME, USER_ID, sc_run_id)` wedlug `sc_sequence`, `sc_active_seconds`, czasu i ID zdarzenia. Nie sumuje checkpointow ani kolejnych eksportow. Zakres dat oznacza dostepne zdarzenia, nie kompletna historie od premiery. Retencja, brak zgody, utracone/poznione raporty i usuniecia danych wplywaja na wynik.
+Eksport liczy kazda rozgrywke `(UNITY_ENVIRONMENT_NAME, USER_ID, sc_run_id)` raz. Wynik wybiera sposrod raportow koncowych death/completed, aby inne migawki nie przeslonily potwierdzonego zakonczenia. Nie sumuje checkpointow ani kolejnych eksportow. Zakres dat oznacza dostepne zdarzenia, nie kompletna historie od premiery. Retencja, brak zgody, utracone/poznione raporty i usuniecia danych wplywaja na wynik.
 
-Wybierz produkcyjne srodowisko. SQL nie odroznia automatycznie testerow; filtr wersji dodaj dopiero po potwierdzeniu prawidlowego `CLIENT_VERSION` lub `EVENT_JSON:sc_build_version`.
+Wybierz produkcyjne srodowisko. Uzgodniony eksport obejmuje CLIENT_VERSION 1.0.0 i 1.0; sam filtr wersji nie odroznia testerow. Escape rate nie oznacza odsetka unikalnych graczy, ktorzy ukonczyli gre.
 
 ## Bezpieczenstwo i koszty
 
