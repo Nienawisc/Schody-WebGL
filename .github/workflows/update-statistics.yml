@@ -1,0 +1,99 @@
+name: Update public statistics
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'statistics/snapshot.json'
+      - 'statistics/*.py'
+      - '.github/workflows/update-statistics.yml'
+  pull_request:
+    branches: [master]
+    paths:
+      - 'statistics/**'
+      - '.github/workflows/update-statistics.yml'
+  workflow_dispatch:
+    inputs:
+      snapshot_json:
+        description: 'PUBLIC_STATS_JSON only. No secrets or raw events. Leave empty to rebuild the saved report.'
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: public-statistics-${{ github.event_name == 'pull_request' && github.event.number || 'master' }}
+  cancel-in-progress: false
+
+jobs:
+  validate-and-render:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Test validation, SVG rendering and report submission
+        run: python -m unittest discover -s statistics -p 'test_*.py' -v
+
+      - name: Validate the report and generate static SVG and JSON
+        env:
+          STATS_SNAPSHOT_JSON: ${{ inputs.snapshot_json || '' }}
+        run: python statistics/build_stats.py --input-env STATS_SNAPSHOT_JSON
+
+      - name: Upload only validated aggregate files
+        uses: actions/upload-artifact@v4
+        with:
+          name: public-statistics
+          path: |
+            statistics/public/stats.svg
+            statistics/public/stats.json
+            statistics/snapshot.json
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/master'
+    needs: validate-and-render
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the tested revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Download validated aggregate files
+        uses: actions/download-artifact@v4
+        with:
+          name: public-statistics
+          path: statistics
+
+      - name: Commit only the validated report and generated public files
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add -- statistics/snapshot.json statistics/public/stats.svg statistics/public/stats.json
+          if git diff --cached --quiet; then
+            echo 'The public statistics are unchanged.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git commit -m 'Update public Lucky Roomber statistics'
+          if ! git push origin HEAD:master; then
+            echo '::error::Could not publish. The branch may have changed or rejected the push. Run the workflow on the latest master revision; no force push is used.'
+            exit 1
+          fi
+          echo 'Published SVG, JSON and the aggregate snapshot on master. The gh-pages game build was not modified. CDN caching can delay visibility.' >> "$GITHUB_STEP_SUMMARY"
