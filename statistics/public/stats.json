@@ -1,12 +1,12 @@
 {
-  "completedRuns": null,
-  "deaths": null,
-  "escapeRatePercent": null,
-  "runs": null,
+  "completedRuns": 5,
+  "deaths": 7,
+  "escapeRatePercent": 41.67,
+  "runs": 18,
   "schemaVersion": 1,
   "scope": "available_analytics_data",
-  "status": "awaiting-data",
-  "updatedAt": null,
-  "windowEnd": null,
-  "windowStart": null
+  "status": "published",
+  "updatedAt": "2026-11-15T10:38:35Z",
+  "windowEnd": "2026-11-15",
+  "windowStart": "2026-11-14"
 }

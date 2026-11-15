@@ -1,9 +1,9 @@
 {
+  "completedRuns": 5,
+  "deaths": 7,
+  "runs": 18,
   "schemaVersion": 1,
-  "updatedAt": null,
-  "windowStart": null,
-  "windowEnd": null,
-  "runs": null,
-  "deaths": null,
-  "completedRuns": null
+  "updatedAt": "2026-11-15T10:38:35Z",
+  "windowEnd": "2026-11-15",
+  "windowStart": "2026-11-14"
 }
