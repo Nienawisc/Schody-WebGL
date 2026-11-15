@@ -1,0 +1,12 @@
+{
+  "completedRuns": null,
+  "deaths": null,
+  "escapeRatePercent": null,
+  "runs": null,
+  "schemaVersion": 1,
+  "scope": "available_analytics_data",
+  "status": "awaiting-data",
+  "updatedAt": null,
+  "windowEnd": null,
+  "windowStart": null
+}
