@@ -35,7 +35,7 @@ def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def normalize_snapshot(data: Any) -> dict[str, Any]:
     if not isinstance(data, dict) or set(data) != FIELDS:
-        raise ValueError("Use only the exact aggregate fields produced by export-public-stats.sql.")
+        raise ValueError("Use only the exact aggregate fields documented in the snapshot schema.")
     if type(data["schemaVersion"]) is not int or data["schemaVersion"] != 1:
         raise ValueError("Unsupported schemaVersion.")
     pending = all(data[field] is None for field in COUNT_FIELDS)
